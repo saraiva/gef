@@ -1,8 +1,8 @@
-## Command pcustom ##
+## Command `pcustom`
 
 `gef` provides a way to create and apply to the currently debugged environment, any new structure (in the C-struct way). On top of simply displaying known and user-defined structures, it also allows to apply those structures to the current context. It intends to mimic the very useful [WinDBG `dt`](https://msdn.microsoft.com/en-us/library/windows/hardware/ff542772(v=vs.85).aspx) command.
 
-This is achieved via the command `pcustom` (for `print custom`), or you can use its alias, `dt` (in reference to the WinDBG command) as provided by the [`WinDbg compatiblity extension`](https://github.com/hugsy/gef-extras/blob/master/scripts/windbg.py)
+This is achieved via the command `pcustom` (for `print custom`), or you can use its alias, `dt` (in reference to the WinDBG command) as provided by the [`WinDbg compatibility extension`](https://github.com/hugsy/gef-extras/blob/main/scripts/windbg.py)
 
 
 ### Configuration
@@ -50,11 +50,11 @@ gef➤  pcustom edit elf32_t
 [+] Editing '/home/hugsy/code/gef-extras/structs/elf32_t.py'
 ```
 
-
+#### Static `ctypes.Structure`-like classes
 
 The code can be defined just as any Python (using `ctypes`) code.
 
-```
+```python
 from ctypes import *
 
 '''
@@ -105,19 +105,63 @@ For a full demo, watch the following tutorial:
 
 [![yt-gef-pcustom](https://img.youtube.com/vi/pid2aW7Bt_w/0.jpg)](https://www.youtube.com/watch?v=pid2aW7Bt_w)
 
-Additionally, if you have successfully configured your IDA settings (see command `ida-interact`), you can also directly import the structure(s) that was(were) reverse-engineered in IDA directly in your GDB session:
-![ida-structure-examples](https://i.imgur.com/Tnsf6nt.png)
+Additionally, if you have successfully configured your IDA settings, you can also directly import the structure(s) that was(were) reverse-engineered in IDA directly in your GDB session:
+![ida-structure-examples](https://i.imgur.com/Tnsf6nt.png) - (see `gef-extras/ida-rpyc`, which is the new improved version of `ida-interact`)
 
-And then use the command `ida ImportStructs` to import all the structures, or `ida ImportStruct <StructName>` to only import a specific one:
 
+#### Dynamic `ctypes.Structure`-like classes
+
+`pcustom` also supports the use of class factories to create a `ctypes.Structure` class whose structure will be adjusted based on the runtime information we provide (information about the currently debugged binary, the architecture, the size of a pointer and more).
+
+The syntax is relatively close to the way we use to create static classes (see above), but instead we define a function that will generate the class. The requirements for this class factory are:
+   - take a single [`Gef`](https://github.com/hugsy/gef/blob/dev/docs/api/gef.md#class-gef) positional argument
+   - End the function name with `_t`
+
+To continue the `person_t` function we defined in the example above, we could modify the static class as a dynamic one very easily:
+
+```python
+import ctypes
+from typing import Optional
+
+def person_t(gef: Optional["Gef"]=None):
+    fields = [
+        ("age",  ctypes.c_int),
+        ("name", ctypes.c_char * 256),
+        ("id", ctypes.c_int),
+    ]
+
+    class person_cls(ctypes.Structure):
+      _fields_ = fields
+
+    return person_cls
 ```
-gef➤  ida ImportStructs
-[+] Success
+
+Thanks to the `gef` parameter, the structure can be transparently adjusted so that GEF will parse it differently with its runtime information. For example, we can add constraints to the example above:
+
+```python
+import ctypes
+from typing import Optional
+
+def person_t(gef: Optional["Gef"]==None):
+    fields = [
+        ("age",  ctypes.c_uint8),
+        ("name", ctypes.c_char * 256),
+        ("id", ctypes.c_uint8),
+    ]
+
+    # constraint on the libc version
+    if gef.libc.version > (2, 27):
+      # or on the pointer size
+      pointer_type = ctypes.c_uint64 if gef.arch.ptrsize == 8 else ctypes.c_uint32
+      fields += [
+        ("new_field", pointer_size)
+      ]
+
+    class person_cls(ctypes.Structure):
+      _fields_ = fields
+
+    return person_cls
 ```
-
-Which will become:
-
-![ida-structure-imported](https://i.imgur.com/KVhyopO.png)
 
 
 ### Public repository of structures

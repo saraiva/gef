@@ -1,4 +1,6 @@
-## Command heap-analysis-helper ##
+## Command `heap-analysis-helper`
+
+Please note: This feature is still under development, expect bugs and unstability.
 
 `heap-analysis-helper` command aims to help the process of idenfitying Glibc
 heap inconsistencies by tracking and analyzing allocations and deallocations of
@@ -70,4 +72,4 @@ subcommand:
 gef➤  heap-analysis-helper show
 ```
 
-![heap-analysis-helper-show](http://i.imgur.com/0I4jBWJ.png)
+![heap-analysis-helper-show](https://i.imgur.com/0I4jBWJ.png)

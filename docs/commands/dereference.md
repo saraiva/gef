@@ -1,4 +1,4 @@
-## Command dereference
+## Command `dereference`
 
 The `dereference` command (also aliased `telescope` for PEDA former users) aims
 to simplify the dereferencing of an address in GDB to determine the content it
@@ -7,9 +7,10 @@ actually points to.
 It is a useful convienence function to spare to process of manually tracking
 values with successive `x/x` in GDB.
 
-`dereference` takes two optional arguments, an address (or symbol or register, etc)
-to dereference (by default, `$sp`) and the number of consecutive addresses to
-dereference (by default, `10`):
+`dereference` takes three optional arguments, a start address (or symbol or
+register, etc) to dereference (by default, `$sp`), the number of consecutive
+addresses to dereference (by default, `10`) and the base location for offset
+calculation (by default the same as the start address):
 
 ```
 gef➤  dereference
@@ -28,7 +29,7 @@ gef➤  dereference
 Here is an example with arguments:
 
 ```
-gef➤  telescope $rbp+0x10 8
+gef➤  telescope $rbp+0x10 -l 8
 0x00007fffffffdf40│+0x0000: 0x00007ffff7fa5760  →  0x00000000fbad2887
 0x00007fffffffdf48│+0x0008: 0x00000001f7e65b63
 0x00007fffffffdf50│+0x0010: 0x0000000000000004
@@ -48,10 +49,24 @@ context (on a 64bit architecture):
 ```
 gef➤  p ($rbp - $rsp)/8
 $3 = 4
-gef➤  dereference 5
+gef➤  dereference -l 5
 0x00007fffffffe170│+0x0000: 0x0000000000400690  →  push r15        ← $rsp
 0x00007fffffffe178│+0x0008: 0x0000000000400460  →  xor ebp, ebp
 0x00007fffffffe180│+0x0010: 0x00007fffffffe270  →  0x1
 0x00007fffffffe188│+0x0018: 0x1
 0x00007fffffffe190│+0x0020: 0x0000000000400690  →  push r15        ← $rbp
+```
+
+It is possible to change the offset calculation to use a different address than
+the start address:
+
+```
+gef➤  dereference $sp -l 7 -r $rbp
+0x00007ffe6ddaa3e0│-0x0030: 0x0000000000000000    ← $rsp
+0x00007ffe6ddaa3e8│-0x0028: 0x0000000000400970  →  <__libc_csu_init+0> push r15
+0x00007ffe6ddaa3f0│-0x0020: 0x0000000000000000
+0x00007ffe6ddaa3f8│-0x0018: 0x00000000004006e0  →  <_start+0> xor ebp, ebp
+0x00007ffe6ddaa400│-0x0010: 0x00007ffe6ddaa500  →  0x0000000000000001
+0x00007ffe6ddaa408│-0x0008: 0xa42456b3ee465800
+0x00007ffe6ddaa410│+0x0000: 0x0000000000000000    ← $rbp
 ```

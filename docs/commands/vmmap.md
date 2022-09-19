@@ -1,8 +1,8 @@
-## Command vmmap ##
+## Command `vmmap`
 
 `vmmap` displays the target process's entire memory space mapping.
 
-![vmmap-example](https://i.imgur.com/iau8SwS.png)
+![vmmap](https://i.imgur.com/V9zMLUt.png)
 
 Interestingly, it helps finding secret gems: as an aware reader might have
 seen, memory mapping differs from one architecture to another (this is one of
@@ -13,6 +13,6 @@ sections set as Read/Write/Execute.
 `vmmap` accepts one argument, either a pattern to match again mapping names,
 or an address to determine which section it belongs to.
 
-![vmmap-grep](http://i.imgur.com/ZFF4QVf.png)
+![vmmap-grep](https://i.imgur.com/ZFF4QVf.png)
 
 ![vmmap-address](https://i.imgur.com/hfcs1jH.png)

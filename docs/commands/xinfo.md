@@ -1,9 +1,9 @@
-## Command xinfo ##
+## Command `xinfo`
 
 `xinfo` displays all the information known to `gef` about the specific address
 given as argument:
 
-![xinfo-example](https://pbs.twimg.com/media/CCSW9JkW4AAx8gD.png:large)
+![xinfo-example](https://i.imgur.com/x0KTAxz.png)
 
 **Important note** : For performance reasons, `gef` caches certain results.
 `gef` will try to automatically refresh its own cache to avoid relying on
