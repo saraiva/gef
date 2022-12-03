@@ -52,6 +52,7 @@
 import abc
 import argparse
 import ast
+import atexit
 import binascii
 import codecs
 import collections
@@ -233,7 +234,7 @@ def highlight_text(text: str) -> str:
 def gef_print(*args: str, end="\n", sep=" ", **kwargs: Any) -> None:
     """Wrapper around print(), using string buffering feature."""
     parts = [highlight_text(a) for a in args]
-    if gef.ui.stream_buffer and not is_debug():
+    if buffer_output() and gef.ui.stream_buffer and not is_debug():
         gef.ui.stream_buffer.write(sep.join(parts) + end)
         return
 
@@ -353,6 +354,15 @@ def is_alive() -> bool:
         return gdb.selected_inferior().pid > 0
     except Exception:
         return False
+
+
+def calling_function() -> Optional[str]:
+    """Return the name of the calling function"""
+    try:
+        stack_info = traceback.extract_stack()[-3]
+        return stack_info.name
+    except:
+        return None
 
 
 #
@@ -617,21 +627,30 @@ class Permission(enum.Flag):
         perm_str += "x" if self & Permission.EXECUTE else "-"
         return perm_str
 
-    @staticmethod
-    def from_info_sections(*args: str) -> "Permission":
-        perm = Permission(0)
+    @classmethod
+    def from_info_sections(cls, *args: str) -> "Permission":
+        perm = cls(0)
         for arg in args:
             if "READONLY" in arg: perm |= Permission.READ
             if "DATA" in arg: perm |= Permission.WRITE
             if "CODE" in arg: perm |= Permission.EXECUTE
         return perm
 
-    @staticmethod
-    def from_process_maps(perm_str: str) -> "Permission":
-        perm = Permission(0)
+    @classmethod
+    def from_process_maps(cls, perm_str: str) -> "Permission":
+        perm = cls(0)
         if perm_str[0] == "r": perm |= Permission.READ
         if perm_str[1] == "w": perm |= Permission.WRITE
         if perm_str[2] == "x": perm |= Permission.EXECUTE
+        return perm
+
+    @classmethod
+    def from_info_mem(cls, perm_str: str) -> "Permission":
+        perm = cls(0)
+        # perm_str[0] shows if this is a user page, which
+        # we don't track
+        if perm_str[1] == "r": perm |= Permission.READ
+        if perm_str[2] == "w": perm |= Permission.WRITE
         return perm
 
 
@@ -1223,9 +1242,9 @@ class GlibcHeapInfo:
         return
 
     def reset(self):
-        self.__sizeof = ctypes.sizeof(GlibcHeapInfo.heap_info_t())
-        self.__data = gef.memory.read(self.__address, ctypes.sizeof(GlibcArena.malloc_state_t()))
-        self.__heap_info = GlibcArena.malloc_state_t().from_buffer_copy(self.__data)
+        self._sizeof = ctypes.sizeof(GlibcHeapInfo.heap_info_t())
+        self._data = gef.memory.read(self.__address, ctypes.sizeof(GlibcArena.malloc_state_t()))
+        self.__heap_info = GlibcArena.malloc_state_t().from_buffer_copy(self._data)
         return
 
     def __getattr__(self, item: Any) -> Any:
@@ -1245,7 +1264,7 @@ class GlibcHeapInfo:
 
     @property
     def sizeof(self) -> int:
-        return self.__sizeof
+        return self._sizeof
 
     @property
     def addr(self) -> int:
@@ -1267,22 +1286,29 @@ class GlibcArena:
         pointer = ctypes.c_uint64 if gef and gef.arch.ptrsize == 8 else ctypes.c_uint32
         fields = [
             ("mutex", ctypes.c_uint32),
-            ("have_fastchunks", ctypes.c_uint32),
             ("flags", ctypes.c_uint32),
         ]
         if gef and gef.libc.version and gef.libc.version >= (2, 27):
+            # https://elixir.bootlin.com/glibc/glibc-2.27/source/malloc/malloc.c#L1684
             fields += [
-                ("UNUSED_c", ctypes.c_uint32),          # padding to align to 0x10
-                ("fastbinsY", GlibcArena.NFASTBINS * pointer),
+                ("have_fastchunks", ctypes.c_uint32),
+                ("UNUSED_c", ctypes.c_uint32), # padding to align to 0x10
             ]
         fields += [
+            ("fastbinsY", GlibcArena.NFASTBINS * pointer),
             ("top", pointer),
             ("last_remainder", pointer),
             ("bins", (GlibcArena.NBINS * 2 - 2) * pointer),
             ("binmap", GlibcArena.BINMAPSIZE * ctypes.c_uint32),
             ("next", pointer),
-            ("next_free", pointer),
-            ("attached_threads", pointer),
+            ("next_free", pointer)
+        ]
+        if gef and gef.libc.version and gef.libc.version >= (2, 23):
+            # https://elixir.bootlin.com/glibc/glibc-2.23/source/malloc/malloc.c#L1719
+            fields += [
+                ("attached_threads", pointer)
+            ]
+        fields += [
             ("system_mem", pointer),
             ("max_system_mem", pointer),
         ]
@@ -1301,9 +1327,9 @@ class GlibcArena:
         return
 
     def reset(self):
-        self.__sizeof = ctypes.sizeof(GlibcArena.malloc_state_t())
-        self.__data = gef.memory.read(self.__address, ctypes.sizeof(GlibcArena.malloc_state_t()))
-        self.__arena = GlibcArena.malloc_state_t().from_buffer_copy(self.__data)
+        self._sizeof = ctypes.sizeof(GlibcArena.malloc_state_t())
+        self._data = gef.memory.read(self.__address, ctypes.sizeof(GlibcArena.malloc_state_t()))
+        self.__arena = GlibcArena.malloc_state_t().from_buffer_copy(self._data)
         return
 
     def __abs__(self) -> int:
@@ -1335,7 +1361,7 @@ class GlibcArena:
         return (f"{Color.colorify('Arena', 'blue bold underline')}({properties})")
 
     def __repr__(self) -> str:
-        return f"GlibcArena(address={self.__address:#x}, size={self.__sizeof})"
+        return f"GlibcArena(address={self.__address:#x}, size={self._sizeof})"
 
     @property
     def address(self) -> int:
@@ -1343,7 +1369,7 @@ class GlibcArena:
 
     @property
     def sizeof(self) -> int:
-        return self.__sizeof
+        return self._sizeof
 
     @property
     def addr(self) -> int:
@@ -1359,8 +1385,6 @@ class GlibcArena:
 
     @property
     def fastbinsY(self) -> ctypes.Array:
-        if not gef.libc.version >= (2, 27):
-            raise RuntimeError
         return self.__arena.fastbinsY
 
     @property
@@ -1391,12 +1415,12 @@ class GlibcArena:
     def max_system_mem(self) -> int:
         return self.__arena.max_system_mem
 
-    def fastbin(self, i: int) -> Optional["GlibcChunk"]:
+    def fastbin(self, i: int) -> Optional["GlibcFastChunk"]:
         """Return head chunk in fastbinsY[i]."""
         addr = int(self.fastbinsY[i])
         if addr == 0:
             return None
-        return GlibcChunk(addr + 2 * gef.arch.ptrsize)
+        return GlibcFastChunk(addr + 2 * gef.arch.ptrsize)
 
     def bin(self, i: int) -> Tuple[int, int]:
         idx = i * 2
@@ -1491,40 +1515,39 @@ class GlibcChunk:
         return
 
     def reset(self):
-        self.__sizeof = ctypes.sizeof(GlibcChunk.malloc_chunk_t())
-        self.__data = gef.memory.read(
+        self._sizeof = ctypes.sizeof(GlibcChunk.malloc_chunk_t())
+        self._data = gef.memory.read(
             self.base_address, ctypes.sizeof(GlibcChunk.malloc_chunk_t()))
-        self.__chunk = GlibcChunk.malloc_chunk_t().from_buffer_copy(self.__data)
+        self._chunk = GlibcChunk.malloc_chunk_t().from_buffer_copy(self._data)
         return
 
     @property
     def prev_size(self) -> int:
-        return self.__chunk.prev_size
+        return self._chunk.prev_size
 
     @property
     def size(self) -> int:
-        return self.__chunk.size & (~0x07)
+        return self._chunk.size & (~0x07)
 
     @property
     def flags(self) -> ChunkFlags:
-        return GlibcChunk.ChunkFlags(self.__chunk.size & 0x07)
+        return GlibcChunk.ChunkFlags(self._chunk.size & 0x07)
 
     @property
     def fd(self) -> int:
-        assert(gef and gef.libc.version)
-        return self.__chunk.fd if gef.libc.version < (2, 32) else self.reveal_ptr(self.data_address)
+        return self._chunk.fd
 
     @property
     def bk(self) -> int:
-        return self.__chunk.bk
+        return self._chunk.bk
 
     @property
     def fd_nextsize(self) -> int:
-        return self.__chunk.fd_nextsize
+        return self._chunk.fd_nextsize
 
     @property
     def bk_nextsize(self) -> int:
-        return self.__chunk.bk_nextsize
+        return self._chunk.bk_nextsize
 
     def get_usable_size(self) -> int:
         # https://github.com/sploitfun/lsploits/blob/master/glibc/malloc/malloc.c#L4537
@@ -1572,40 +1595,6 @@ class GlibcChunk:
 
     def get_next_chunk_addr(self) -> int:
         return self.data_address + self.size
-
-    def protect_ptr(self, pos: int, pointer: int) -> int:
-        """https://elixir.bootlin.com/glibc/glibc-2.32/source/malloc/malloc.c#L339"""
-        assert(gef and gef.libc.version)
-        if gef.libc.version < (2, 32):
-            return pointer
-        return (pos >> 12) ^ pointer
-
-    def reveal_ptr(self, pointer: int) -> int:
-        """https://elixir.bootlin.com/glibc/glibc-2.32/source/malloc/malloc.c#L341"""
-        assert(gef and gef.libc.version)
-        if gef.libc.version < (2, 32):
-            return pointer
-        return gef.memory.read_integer(pointer) ^ (pointer >> 12)
-
-    # obsolete functions
-    @deprecated(f"Use `GlibcChunk.fd`")
-    def get_fwd_ptr(self) -> int:
-        return self.fd
-
-    @deprecated(f"Use `GlibcChunk.bk`")
-    def get_bkw_ptr(self) -> int:
-        return gef.memory.read_integer(self.data_address + gef.arch.ptrsize)
-
-    @property
-    def fwd(self) -> int:
-        warn(f"[Obsolete] `GlibcChunk.fwd` is deprecated, use `GlibcChunk.fd`")
-        return self.get_fwd_ptr()
-
-    @property
-    def bck(self) -> int:
-        warn(f"[Obsolete]  `GlibcChunk.bck` is deprecated, use `GlibcChunk.bk`")
-        return self.get_bkw_ptr()
-    # endif obsolete functions
 
     def has_p_bit(self) -> bool:
         return bool(self.flags & GlibcChunk.ChunkFlags.PREV_INUSE)
@@ -1677,6 +1666,34 @@ class GlibcChunk:
         if not self.is_used():
             msg.append(f"\n\n{self._str_pointers()}")
         return "\n".join(msg) + "\n"
+
+
+class GlibcFastChunk(GlibcChunk):
+
+    @property
+    def fd(self) -> int:
+        assert(gef and gef.libc.version)
+        if gef.libc.version < (2, 32):
+            return self._chunk.fd
+        return self.reveal_ptr(self.data_address)
+
+    def protect_ptr(self, pos: int, pointer: int) -> int:
+        """https://elixir.bootlin.com/glibc/glibc-2.32/source/malloc/malloc.c#L339"""
+        assert(gef and gef.libc.version)
+        if gef.libc.version < (2, 32):
+            return pointer
+        return (pos >> 12) ^ pointer
+
+    def reveal_ptr(self, pointer: int) -> int:
+        """https://elixir.bootlin.com/glibc/glibc-2.32/source/malloc/malloc.c#L341"""
+        assert(gef and gef.libc.version)
+        if gef.libc.version < (2, 32):
+            return pointer
+        return gef.memory.read_integer(pointer) ^ (pointer >> 12)
+
+class GlibcTcacheChunk(GlibcFastChunk):
+
+    pass
 
 
 @lru_cache()
@@ -1752,8 +1769,8 @@ def show_last_exception() -> None:
     def _show_code_line(fname: str, idx: int) -> str:
         fname = os.path.expanduser(os.path.expandvars(fname))
         with open(fname, "r") as f:
-            __data = f.readlines()
-        return __data[idx - 1] if 0 < idx < len(__data) else ""
+            _data = f.readlines()
+        return _data[idx - 1] if 0 < idx < len(_data) else ""
 
     gef_print("")
     exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -1872,6 +1889,11 @@ def hexdump(source: ByteString, length: int = 0x10, separator: str = ".", show_r
 def is_debug() -> bool:
     """Check if debug mode is enabled."""
     return gef.config["gef.debug"] is True
+
+
+def buffer_output() -> bool:
+    """Check if output should be buffered until command completion."""
+    return gef.config["gef.buffer"] is True
 
 
 def hide_context() -> bool:
@@ -2250,6 +2272,9 @@ class Architecture(ArchitectureBase):
         raise NotImplementedError
 
     def get_ra(self, insn: Instruction, frame: "gdb.Frame") -> Optional[int]:
+        raise NotImplementedError
+
+    def canary_address(self) -> int:
         raise NotImplementedError
 
     @classmethod
@@ -2912,6 +2937,8 @@ class X86_64(X86):
         ]
         return "; ".join(insns)
 
+    def canary_address(self) -> int:
+        return self.register("fs_base") + 0x28
 
 class PowerPC(Architecture):
     aliases = ("PowerPC", Elf.Abi.POWERPC, "PPC")
@@ -3325,15 +3352,15 @@ def get_os() -> str:
 def is_qemu() -> bool:
     if not is_remote_debug():
         return False
-    response = gdb.execute('maintenance packet Qqemu.sstepbits', to_string=True, from_tty=False)
-    return 'ENABLE=' in response
+    response = gdb.execute("maintenance packet Qqemu.sstepbits", to_string=True, from_tty=False)
+    return "ENABLE=" in response
 
 
 @lru_cache()
 def is_qemu_usermode() -> bool:
     if not is_qemu():
         return False
-    response = gdb.execute('maintenance packet QOffsets', to_string=True, from_tty=False)
+    response = gdb.execute("maintenance packet qOffsets", to_string=True, from_tty=False)
     return "Text=" in response
 
 
@@ -3341,8 +3368,8 @@ def is_qemu_usermode() -> bool:
 def is_qemu_system() -> bool:
     if not is_qemu():
         return False
-    response = gdb.execute('maintenance packet QOffsets', to_string=True, from_tty=False)
-    return 'received: ""' in response
+    response = gdb.execute("maintenance packet qOffsets", to_string=True, from_tty=False)
+    return "received: \"\"" in response
 
 
 def get_filepath() -> Optional[str]:
@@ -3479,11 +3506,16 @@ def hook_stop_handler(_: "gdb.StopEvent") -> None:
     return
 
 
-def new_objfile_handler(evt: "gdb.Event") -> None:
+def new_objfile_handler(evt: Optional["gdb.NewObjFileEvent"]) -> None:
     """GDB event handler for new object file cases."""
     reset_all_caches()
+    path = evt.new_objfile.filename if evt else gdb.current_progspace().filename
     try:
-        target = pathlib.Path( evt.new_objfile.filename if evt else gdb.current_progspace().filename)
+        if gef.session.root and path.startswith("target:"):
+            # If the process is in a container, replace the "target:" prefix
+            # with the actual root directory of the process.
+            path = path.replace("target:", str(gef.session.root), 1)
+        target = pathlib.Path(path)
         FileFormatClasses = list(filter(lambda fmtcls: fmtcls.is_valid(target), __registered_file_formats__))
         GuessedFileFormatClass : Type[FileFormat] = FileFormatClasses.pop() if len(FileFormatClasses) else Elf
         binary = GuessedFileFormatClass(target)
@@ -3493,7 +3525,11 @@ def new_objfile_handler(evt: "gdb.Event") -> None:
         else:
             gef.session.modules.append(binary)
     except FileNotFoundError as fne:
-        warn(f"Failed to find objfile or not a valid file format: {str(fne)}")
+        # Linux automatically maps the vDSO into our process, and GDB
+        # will give us the string 'system-supplied DSO' as a path.
+        # This is normal, so we shouldn't warn the user about it
+        if "system-supplied DSO" not in path:
+            warn(f"Failed to find objfile or not a valid file format: {str(fne)}")
     except RuntimeError as re:
         warn(f"Not a valid file format: {str(re)}")
     return
@@ -3505,9 +3541,10 @@ def exit_handler(_: "gdb.ExitedEvent") -> None:
     reset_all_caches()
     gef.session.qemu_mode = False
     if gef.session.remote:
-        # make sure the tempdir is trashed
-        del(gef.session.remote)
+        gef.session.remote.close()
+        del gef.session.remote
         gef.session.remote = None
+        gef.session.remote_initializing = False
     return
 
 
@@ -3601,6 +3638,7 @@ def reset_architecture(arch: Optional[str] = None) -> None:
             gef.arch = arches[arch]()
         except KeyError:
             raise OSError(f"Specified arch {arch.upper()} is not supported")
+        return
 
     gdb_arch = get_arch()
 
@@ -3720,7 +3758,7 @@ def is_in_x86_kernel(address: int) -> bool:
 
 def is_remote_debug() -> bool:
     """"Return True is the current debugging session is running through GDB remote session."""
-    return gef.session.remote is not None
+    return gef.session.remote_initializing or gef.session.remote is not None
 
 
 def de_bruijn(alphabet: bytes, n: int) -> Generator[str, None, None]:
@@ -4688,7 +4726,7 @@ class PieBreakpointCommand(GenericCommand):
 
     @parse_arguments({"offset": ""}, {})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.offset:
             self.usage()
             return
@@ -4720,7 +4758,7 @@ class PieInfoCommand(GenericCommand):
 
     @parse_arguments({"breakpoints": [-1,]}, {})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if args.breakpoints[0] == -1:
             # No breakpoint info needed
             bps = gef.session.pie_breakpoints.values()
@@ -4747,7 +4785,7 @@ class PieDeleteCommand(GenericCommand):
     @parse_arguments({"breakpoints": [-1,]}, {})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
         global gef
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if args.breakpoints[0] == -1:
             # no arg, delete all
             to_delete = list(gef.session.pie_breakpoints.values())
@@ -5391,7 +5429,7 @@ class PCustomCommand(GenericCommand):
 
     @parse_arguments({"type": "", "address": ""}, {})
     def do_invoke(self, *_: Any, **kwargs: Dict[str, Any]) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.type:
             gdb.execute("pcustom list")
             return
@@ -5903,7 +5941,7 @@ class RemoteCommand(GenericCommand):
             return
 
         # argument check
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.host or not args.port:
             err("Missing parameters")
             return
@@ -5920,7 +5958,12 @@ class RemoteCommand(GenericCommand):
             return
 
         # try to establish the remote session, throw on error
+        # Set `.remote_initializing` to True here - `GefRemoteSessionManager` invokes code which
+        # calls `is_remote_debug` which checks if `remote_initializing` is True or `.remote` is None
+        # This prevents some spurious errors being thrown during startup
+        gef.session.remote_initializing = True
         gef.session.remote = GefRemoteSessionManager(args.host, args.port, args.pid, qemu_binary)
+        gef.session.remote_initializing = False
         reset_all_caches()
         gdb.execute("context")
         return
@@ -5944,7 +5987,7 @@ class NopCommand(GenericCommand):
     @only_if_gdb_running
     @parse_arguments({"address": "$pc"}, {"--nb": 0, })
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         address = parse_address(args.address)
         nop = gef.arch.nop_insn
         number_of_bytes = args.nb or 1
@@ -5982,7 +6025,7 @@ class StubCommand(GenericCommand):
     @only_if_gdb_running
     @parse_arguments({"address": ""}, {("-r", "--retval"): 0})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         loc = args.address if args.address else f"*{gef.arch.pc:#x}"
         StubBreakpoint(loc, args.retval)
         return
@@ -6072,7 +6115,7 @@ class GlibcHeapChunkCommand(GenericCommand):
     @parse_arguments({"address": ""}, {"--allow-unaligned": True, "--number": 1})
     @only_if_gdb_running
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.address:
             err("Missing chunk address")
             self.usage()
@@ -6082,7 +6125,7 @@ class GlibcHeapChunkCommand(GenericCommand):
         current_chunk = GlibcChunk(addr, allow_unaligned=args.allow_unaligned)
 
         if args.number > 1:
-            for _ in range(args.number):
+            for _i in range(args.number):
                 if current_chunk.size == 0:
                     break
 
@@ -6202,14 +6245,15 @@ class GlibcHeapBinsCommand(GenericCommand):
             warn("Invalid backward and forward bin pointers(fw==bk==NULL)")
             return -1
 
-        if gef.libc.version >= (2, 34):
-            if index >= 1:
-                previous_bin_address = arena.bin_at(index-1)
-                if previous_bin_address == fd:
-                    return 0
+        if _type == "tcache":
+            chunkClass = GlibcTcacheChunk
+        elif _type == "fast":
+            chunkClass = GlibcFastChunk
+        else:
+            chunkClass = GlibcChunk
 
         nb_chunk = 0
-        head = GlibcChunk(bk, from_base=True).fd
+        head = chunkClass(bk, from_base=True).fd
         if fd == head:
             return nb_chunk
 
@@ -6217,7 +6261,7 @@ class GlibcHeapBinsCommand(GenericCommand):
 
         m = []
         while fd != head:
-            chunk = GlibcChunk(fd, from_base=True)
+            chunk = chunkClass(fd, from_base=True)
             m.append(f"{RIGHT_ARROW}  {chunk!s}")
             fd = chunk.fd
             nb_chunk += 1
@@ -6302,7 +6346,7 @@ class GlibcHeapTcachebinsCommand(GenericCommand):
                         if next_chunk == 0:
                             break
 
-                        chunk = GlibcChunk(next_chunk)
+                        chunk = GlibcTcacheChunk(next_chunk)
                     except gdb.MemoryError:
                         msg.append(f"{LEFT_ARROW} [Corrupted chunk at {chunk.data_address:#x}]")
                         break
@@ -6359,13 +6403,13 @@ class GlibcHeapTcachebinsCommand(GenericCommand):
         return list(valid_tids)
 
     @staticmethod
-    def tcachebin(tcache_base: int, i: int) -> Tuple[Optional[GlibcChunk], int]:
+    def tcachebin(tcache_base: int, i: int) -> Tuple[Optional[GlibcTcacheChunk], int]:
         """Return the head chunk in tcache[i] and the number of chunks in the bin."""
         if i >= GlibcHeapTcachebinsCommand.TCACHE_MAX_BINS:
             err("Incorrect index value, index value must be between 0 and {}-1, given {}".format(GlibcHeapTcachebinsCommand.TCACHE_MAX_BINS, i))
             return None, 0
 
-        tcache_chunk = GlibcChunk(tcache_base)
+        tcache_chunk = GlibcTcacheChunk(tcache_base)
 
         # Glibc changed the size of the tcache in version 2.30; this fix has
         # been backported inconsistently between distributions. We detect the
@@ -6388,7 +6432,7 @@ class GlibcHeapTcachebinsCommand(GenericCommand):
             count = u16(gef.memory.read(tcache_base + tcache_count_size*i, 2))
 
         chunk = dereference(tcache_base + tcache_count_size*GlibcHeapTcachebinsCommand.TCACHE_MAX_BINS + i*gef.arch.ptrsize)
-        chunk = GlibcChunk(int(chunk)) if chunk else None
+        chunk = GlibcTcacheChunk(int(chunk)) if chunk else None
         return chunk, count
 
 
@@ -6410,7 +6454,7 @@ class GlibcHeapFastbinsYCommand(GenericCommand):
         def fastbin_index(sz: int) -> int:
             return (sz >> 4) - 2 if SIZE_SZ == 8 else (sz >> 3) - 2
 
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not gef.heap.main_arena:
             err("Heap not initialized")
             return
@@ -6450,7 +6494,7 @@ class GlibcHeapFastbinsYCommand(GenericCommand):
                     if next_chunk == 0:
                         break
 
-                    chunk = GlibcChunk(next_chunk, from_base=True)
+                    chunk = GlibcFastChunk(next_chunk, from_base=True)
                 except gdb.MemoryError:
                     gef_print(f"{LEFT_ARROW} [Corrupted chunk at {chunk.data_address:#x}]", end="")
                     break
@@ -6473,7 +6517,7 @@ class GlibcHeapUnsortedBinsCommand(GenericCommand):
     @parse_arguments({"arena_address": ""}, {})
     @only_if_gdb_running
     def do_invoke(self, *_: Any, **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if gef.heap.main_arena is None:
             err("Heap not initialized")
             return
@@ -6499,7 +6543,7 @@ class GlibcHeapSmallBinsCommand(GenericCommand):
     @parse_arguments({"arena_address": ""}, {})
     @only_if_gdb_running
     def do_invoke(self, *_: Any, **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not gef.heap.main_arena:
             err("Heap not initialized")
             return
@@ -6531,7 +6575,7 @@ class GlibcHeapLargeBinsCommand(GenericCommand):
     @parse_arguments({"arena_address": ""}, {})
     @only_if_gdb_running
     def do_invoke(self, *_: Any, **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if gef.heap.main_arena is None:
             err("Heap not initialized")
             return
@@ -6564,7 +6608,7 @@ class SolveKernelSymbolCommand(GenericCommand):
                 return int(num, 16)
             except ValueError:
                 return 0
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.symbol:
             self.usage()
             return
@@ -6601,7 +6645,7 @@ class DetailRegistersCommand(GenericCommand):
         string_color = gef.config["theme.dereference_string"]
         regs = gef.arch.all_registers
 
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if args.registers and args.registers[0]:
             required_regs = set(args.registers)
             valid_regs = [reg for reg in gef.arch.all_registers if reg in required_regs]
@@ -6754,7 +6798,7 @@ class ShellcodeGetCommand(GenericCommand):
     _aliases_ = ["sc-get",]
 
     api_base = "http://shell-storm.org"
-    get_url = f"{api_base}/shellcode/files/shellcode-{{:d}}.php"
+    get_url = f"{api_base}/shellcode/files/shellcode-{{:d}}.html"
 
     def do_invoke(self, argv: List[str]) -> None:
         if len(argv) != 1:
@@ -6778,13 +6822,11 @@ class ShellcodeGetCommand(GenericCommand):
             return
 
         ok("Downloaded, written to disk...")
-        tempdir = gef.config["gef.tempdir"]
-        fd, fname = tempfile.mkstemp(suffix=".txt", prefix="sc-", text=True, dir=tempdir)
-        shellcode = res.splitlines()[7:-11]
-        shellcode = b"\n".join(shellcode).replace(b"&quot;", b'"')
-        os.write(fd, shellcode)
-        os.close(fd)
-        ok(f"Shellcode written to '{fname}'")
+        with tempfile.NamedTemporaryFile(prefix="sc-", suffix=".txt", mode='w+b', delete=False, dir=gef.config["gef.tempdir"]) as fd:
+            shellcode = res.split(b"<pre>")[1].split(b"</pre>")[0]
+            shellcode = shellcode.replace(b"&quot;", b'"')
+            fd.write(shellcode)
+            ok(f"Shellcode written to '{fd.name}'")
         return
 
 
@@ -6805,7 +6847,7 @@ class ProcessListingCommand(GenericCommand):
 
     @parse_arguments({"pattern": ""}, {"--attach": True, "--smart-scan": True})
     def do_invoke(self, _: List, **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         do_attach = args.attach
         smart_scan = args.smart_scan
         pattern = args.pattern
@@ -6868,7 +6910,7 @@ class ElfInfoCommand(GenericCommand):
 
     @parse_arguments({}, {"--filename": ""})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
 
         if is_qemu_system():
             err("Unsupported")
@@ -7026,7 +7068,7 @@ class NamedBreakpointCommand(GenericCommand):
 
     @parse_arguments({"name": "", "address": "*$pc"}, {})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not args.name:
             err("Missing name for breakpoint")
             self.usage()
@@ -7864,7 +7906,7 @@ class HexdumpCommand(GenericCommand):
             err("Invalid command")
             return
 
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         target = args.address or self.__last_target
         start_addr = parse_address(target)
         read_from = align_address(start_addr)
@@ -7997,7 +8039,7 @@ class PatchCommand(GenericCommand):
     @only_if_gdb_running
     @parse_arguments({"location": "", "values": ["", ]}, {})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         if not self.format or self.format not in self.SUPPORTED_SIZES:
             self.usage()
             return
@@ -8224,7 +8266,7 @@ class DereferenceCommand(GenericCommand):
     @only_if_gdb_running
     @parse_arguments({"address": "$sp"}, {("-r", "--reference"): "", ("-l", "--length"): 10})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         nb = args.length
 
         target = args.address
@@ -8685,7 +8727,7 @@ class PatternCreateCommand(GenericCommand):
 
     @parse_arguments({"length": 0}, {("-n", "--n"): 0})
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
-        args = kwargs["arguments"]
+        args : argparse.Namespace = kwargs["arguments"]
         length = args.length or gef.config["pattern.length"]
         n = args.n or gef.arch.ptrsize
         info(f"Generating a pattern of {length:d} bytes (n={n:d})")
@@ -8716,6 +8758,7 @@ class PatternSearchCommand(GenericCommand):
         if not args.pattern:
             warn("No pattern provided")
             return
+
         max_length = args.max_length or gef.config["pattern.length"]
         n = args.period or gef.arch.ptrsize
         if n not in (2, 4, 8) or n > gef.arch.ptrsize:
@@ -9318,6 +9361,7 @@ class GefCommand(gdb.Command):
         gef.config["gef.disable_color"] = GefSetting(False, bool, "Disable all colors in GEF")
         gef.config["gef.tempdir"] = GefSetting(GEF_TEMP_DIR, str, "Directory to use for temporary/cache content")
         gef.config["gef.show_deprecation_warnings"] = GefSetting(True, bool, "Toggle the display of the `deprecated` warnings")
+        gef.config["gef.buffer"] = GefSetting(True, bool, "Internally buffer command output until completion")
 
         self.commands : Dict[str, GenericCommand] = collections.OrderedDict()
         self.functions : Dict[str, GenericFunction] = collections.OrderedDict()
@@ -9962,12 +10006,13 @@ class GefTmuxSetup(gdb.Command):
         forcing the context to be redirected there."""
         tmux = which("tmux")
         ok("tmux session found, splitting window...")
-        old_ptses = set(os.listdir("/dev/pts"))
-        gdb.execute(f"! {tmux} split-window -h 'clear ; cat'")
+
+        pane, pty = subprocess.check_output([tmux, "splitw", "-h", '-F#{session_name}:#{window_index}.#{pane_index}-#{pane_tty}', "-P"]).decode().strip().split("-")
+        atexit.register(lambda : subprocess.run([tmux, "kill-pane", "-t", pane]))
+        # clear the screen and let it wait for input forever
+        gdb.execute(f"! {tmux} send-keys -t {pane} 'clear ; cat' C-m")
         gdb.execute(f"! {tmux} select-pane -L")
-        new_ptses = set(os.listdir("/dev/pts"))
-        pty = list(new_ptses - old_ptses)[0]
-        pty = f"/dev/pts/{pty}"
+
         ok(f"Setting `context.redirect` to '{pty}'...")
         gdb.execute(f"gef config context.redirect {pty}")
         ok("Done!")
@@ -10158,6 +10203,12 @@ class GefMemoryManager(GefManager):
     def __parse_maps(self) -> List[Section]:
         """Return the mapped memory sections"""
         try:
+            if is_qemu_system():
+                return list(self.__parse_info_mem())
+        except gdb.error:
+            # Target may not support this command
+            pass
+        try:
             return list(self.__parse_procfs_maps())
         except FileNotFoundError:
             return list(self.__parse_gdb_info_sections())
@@ -10220,6 +10271,27 @@ class GefMemoryManager(GefManager):
             except ValueError:
                 continue
         return
+
+    def __parse_info_mem(self) -> Generator[Section, None, None]:
+        """Get the memory mapping from GDB's command `monitor info mem`"""
+        for line in StringIO(gdb.execute("monitor info mem", to_string=True)):
+            if not line:
+                break
+            try:
+                ranges, off, perms = line.split()
+                off = int(off, 16)
+                start, end = [int(s, 16) for s in ranges.split("-")]
+            except ValueError as e:
+                continue
+
+            perm = Permission.from_info_mem(perms)
+            yield Section(
+                page_start=start,
+                page_end=end,
+                offset=off,
+                permission=perm,
+                inode="",
+            )
 
 
 class GefHeapManager(GefManager):
@@ -10399,6 +10471,7 @@ class GefSessionManager(GefManager):
     def __init__(self) -> None:
         self.reset_caches()
         self.remote: Optional["GefRemoteSessionManager"] = None
+        self.remote_initializing: bool = False
         self.qemu_mode: bool = False
         self.convenience_vars_index: int = 0
         self.heap_allocated_chunks: List[Tuple[int, int]] = []
@@ -10420,8 +10493,8 @@ class GefSessionManager(GefManager):
         self._os = None
         self._pid = None
         self._file = None
-        self._canary = None
         self._maps: Optional[pathlib.Path] = None
+        self._root: Optional[pathlib.Path] = None
         return
 
     def __str__(self) -> str:
@@ -10431,12 +10504,13 @@ class GefSessionManager(GefManager):
     def auxiliary_vector(self) -> Optional[Dict[str, int]]:
         if not is_alive():
             return None
-
+        if is_qemu_system():
+            return None
         if not self._auxiliary_vector:
             auxiliary_vector = {}
             auxv_info = gdb.execute("info auxv", to_string=True)
-            if "failed" in auxv_info:
-                err(auxv_info)
+            if not auxv_info or "failed" in auxv_info:
+                err("Failed to query auxiliary variables")
                 return None
             for line in auxv_info.splitlines():
                 line = line.split('"')[0].strip()  # remove the ending string (if any)
@@ -10493,15 +10567,30 @@ class GefSessionManager(GefManager):
 
     @property
     def canary(self) -> Optional[Tuple[int, int]]:
-        """Returns a tuple of the canary address and value, read from the auxiliary vector."""
+        """Return a tuple of the canary address and value, read from the canonical
+        location if supported by the architecture. Otherwise, read from the auxiliary
+        vector."""
+        try:
+            canary_location = gef.arch.canary_address()
+            canary = gef.memory.read_integer(canary_location)
+        except NotImplementedError:
+            # Fall back to `AT_RANDOM`, which is the original source
+            # of the canary value but not the canonical location
+            return self.original_canary
+        return canary, canary_location
+
+    @property
+    def original_canary(self) -> Optional[Tuple[int, int]]:
+        """Return a tuple of the initial canary address and value, read from the
+        auxiliary vector."""
         auxval = self.auxiliary_vector
         if not auxval:
             return None
         canary_location = auxval["AT_RANDOM"]
         canary = gef.memory.read_integer(canary_location)
         canary &= ~0xFF
-        self._canary = (canary, canary_location)
-        return self._canary
+        return canary, canary_location
+
 
     @property
     def maps(self) -> Optional[pathlib.Path]:
@@ -10515,6 +10604,14 @@ class GefSessionManager(GefManager):
                 self._maps = pathlib.Path(f"/proc/{self.pid}/maps")
         return self._maps
 
+    @property
+    def root(self) -> Optional[pathlib.Path]:
+        """Returns the path to the process's root directory."""
+        if not is_alive():
+            return None
+        if not self._root:
+            self._root = pathlib.Path(f"/proc/{self.pid}/root")
+        return self._root
 
 class GefRemoteSessionManager(GefSessionManager):
     """Class for managing remote sessions with GEF. It will create a temporary environment
@@ -10533,7 +10630,7 @@ class GefRemoteSessionManager(GefSessionManager):
             raise EnvironmentError(f"Failed to create a proper environment for {self.target}")
         return
 
-    def __del__(self) -> None:
+    def close(self) -> None:
         self.__local_root_fd.cleanup()
         try:
             gef_on_new_unhook(self.remote_objfile_event_handler)
@@ -10689,7 +10786,7 @@ class GefRemoteSessionManager(GefSessionManager):
 
     def remote_objfile_event_handler(self, evt: "gdb.NewObjFileEvent") -> None:
         dbg(f"[remote] in remote_objfile_handler({evt.new_objfile.filename if evt else 'None'}))")
-        if not evt:
+        if not evt or not evt.new_objfile.filename:
             return
         if not evt.new_objfile.filename.startswith("target:") and not evt.new_objfile.filename.startswith("/"):
             warn(f"[remote] skipping '{evt.new_objfile.filename}'")
@@ -10820,7 +10917,7 @@ if __name__ == "__main__":
         "set pagination off",
         "set print elements 0",
         "set history save on",
-        "set history filename ~/.gdb_history",
+        f"set history filename {os.getenv('GDBHISTFILE', '~/.gdb_history')}",
         "set output-radix 0x10",
         "set print pretty on",
         "set disassembly-flavor intel",
@@ -10856,3 +10953,8 @@ if __name__ == "__main__":
         new_objfile_handler(None)
 
     GefTmuxSetup()
+
+    # `target remote` commands cannot be disabled, so print a warning message instead
+    errmsg = "Using `target remote` with GEF does not work, use `gef-remote` instead. You've been warned."
+    gdb.execute(f"define target hook-remote\n pi if calling_function() != \"connect\": err(\"{errmsg}\") \nend")
+    gdb.execute(f"define target hook-extended-remote\n pi if calling_function() != \"connect\": err(\"{errmsg}\") \nend")

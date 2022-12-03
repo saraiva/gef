@@ -1,6 +1,6 @@
 # GEF - GDB Enhanced Features #
 
-[![Docs](https://img.shields.io/badge/Documentation-blue.svg)](https://hugsy.github.io/gef/) [![MIT](https://img.shields.io/packagist/l/doctrine/orm.svg?maxAge=2592000?style=plastic)](https://github.com/hugsy/gef/blob/main/LICENSE) [![Python 3](https://img.shields.io/badge/Python-3-green.svg)](https://github.com/hugsy/gef/) [![Discord](https://img.shields.io/badge/Discord-GDB--GEF-yellow)](https://discord.gg/HCS8Hg7)
+[![Docs](https://img.shields.io/badge/Documentation-blue.svg)](https://hugsy.github.io/gef/) [![Coverage](https://img.shields.io/badge/Coverage-purple.svg)](https://hugsy.github.io/gef/coverage/) [![MIT](https://img.shields.io/packagist/l/doctrine/orm.svg?maxAge=2592000?style=plastic)](https://github.com/hugsy/gef/blob/main/LICENSE) [![Python 3](https://img.shields.io/badge/Python-3-green.svg)](https://github.com/hugsy/gef/) [![Discord](https://img.shields.io/badge/Discord-GDB--GEF-yellow)](https://discord.gg/HCS8Hg7)
 
 `GEF` (pronounced ʤɛf - "Jeff") is a kick-ass set of commands for X86, ARM,
 MIPS, PowerPC and SPARC to make GDB cool again for exploit dev. It is aimed to
@@ -37,7 +37,7 @@ GEF has no dependencies, is fully battery-included and works out of the box. You
 bash -c "$(curl -fsSL https://gef.blah.cat/sh)"
 ```
 
-For more details and other ways to install GEF please see [installation page](/docs/install.md).
+For more details and other ways to install GEF please see [installation page](https://hugsy.github.io/gef/install/).
 
 
 ### Run
