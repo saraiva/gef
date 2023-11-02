@@ -2,33 +2,33 @@
 
 Base command to add, remove, and list `GEF` defined aliases.
 
-```
+```text
 gef➤  aliases
 aliases (add|rm|list)
 ```
 
 ### Adding/Removing Aliases
 
-`GEF` defines its own aliasing mechanism which overrides the traditional
-alias that GDB provides through the built-in command `alias`. To add a new alias,
-simply use the `aliases add` command. The "command" parameter may contain spaces.
+`GEF` defines its own aliasing mechanism which overrides the traditional alias that GDB provides
+through the built-in command `alias`. To add a new alias, simply use the `aliases add` command. The
+"command" parameter may contain spaces.
 
-```
+```text
 aliases add [alias] [command]
 ```
 
 To remove an alias, simply use the `aliases rm` command.
 
-```
+```text
 aliases rm [alias]
 ```
 
 ### Listing Aliases
 
-One can list aliases by using the `aliases ls` command. Some sample output of this
-command is seen below.
+One can list aliases by using the `aliases ls` command. Some sample output of this command is seen
+below.
 
-```
+```text
 [+] Aliases defined:
 fmtstr-helper                   →  format-string-helper
 telescope                       →  dereference
@@ -46,13 +46,12 @@ ps                              →  process-search
 
 ### Using the Configuration File
 
-Users can also create/modify/delete aliases by editing the `GEF` configuration file,
-by default located at `~/.gef.rc`. The aliases must be in the `aliases` section
-of the configuration file.
+Users can also create/modify/delete aliases by editing the `GEF` configuration file, by default
+located at `~/.gef.rc`. The aliases must be in the `aliases` section of the configuration file.
 
 Creating a new alias is as simple as creating a new entry in this section:
 
-```
+```text
 $ nano ~/.gef.rc
 [...]
 [aliases]
@@ -61,10 +60,10 @@ my-new-alias = gdb-or-gef-command <arg1> <arg2> <etc...>
 
 #### Bringing some PEDA and WinDBG flavours into GEF
 
-For example, for those (like me) who use WinDBG and like its bindings, they can
-be integrated into GDB via GEF aliases like this:
+For example, for those (like me) who use WinDBG and like its bindings, they can be integrated into
+GDB via GEF aliases like this:
 
-```
+```text
 $ nano ~/.gef.rc
 [...]
 [aliases]
@@ -90,10 +89,9 @@ g = gef run
 uf = disassemble
 ```
 
-Or here are some `PEDA` aliases for people used to using `PEDA` who made the
-smart move to `GEF`.
+Or here are some `PEDA` aliases for people used to using `PEDA` who made the smart move to `GEF`.
 
-```
+```text
 # some peda aliases
 telescope = dereference
 start = entry-break
@@ -103,9 +101,9 @@ kp = info stack
 findmem = search-pattern
 ```
 
-The aliases will be loaded next time you load GDB (and `GEF`). Or you can force
-`GEF` to reload the settings with the command:
+The aliases will be loaded next time you load GDB (and `GEF`). Or you can force `GEF` to reload the
+settings with the command:
 
-```
+```text
 gef➤  gef restore
 ```

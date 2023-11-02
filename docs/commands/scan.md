@@ -1,20 +1,19 @@
 ## Command `scan`
 
-`scan` searches for addresses of one memory region (needle) inside another
-region (haystack) and lists all results.
+`scan` searches for addresses of one memory region (needle) inside another region (haystack) and
+lists all results.
 
 Usage:
 
-```
+```text
 gef➤  scan NEEDLE HAYSTACK
 ```
 
-`scan` requires two arguments, the first is the memory section that will be
-searched and the second is what will be searched for. The arguments are grepped
-against the process's memory mappings (just like [vmmap](./vmmap.md)) to
-determine the memory ranges to search.
+`scan` requires two arguments, the first is the memory section that will be searched and the second
+is what will be searched for. The arguments are grepped against the process's memory mappings (just
+like [vmmap](./vmmap.md)) to determine the memory ranges to search.
 
-```
+```text
 gef➤  scan stack libc
 [+] Searching for addresses in 'stack' that point to 'libc'
 [stack]: 0x00007fffffffd6a8│+0x1f6a8: 0x00007ffff77cf482  →  "__tunable_get_val"
@@ -25,10 +24,9 @@ gef➤  scan stack libc
 [...]
 ```
 
-### Advanced Needle/Haystack syntax ###
+### Advanced Needle/Haystack syntax
 
-To check mappings without a path associated, an address range (start-end) can
-be used. Note that ranges don't include whitespaces.
+To check mappings without a path associated, an address range (start-end) can be used. Note that
+ranges don't include whitespaces.
 
 ![scan-address](https://i.imgur.com/ExJC2p7.png)
-

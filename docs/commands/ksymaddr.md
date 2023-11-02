@@ -4,13 +4,13 @@
 
 The syntax is straight forward:
 
-```
+```text
 ksymaddr <PATTERN>
 ```
 
 For example,
 
-```
+```text
 gef➤  ksymaddr commit_creds
 [+] Found matching symbol for 'commit_creds' at 0xffffffff8f495740 (type=T)
 [*] Found partial match for 'commit_creds' at 0xffffffff8f495740 (type=T): commit_creds
@@ -19,6 +19,6 @@ gef➤  ksymaddr commit_creds
 [*] Found partial match for 'commit_creds' at 0xffffffff8fc9bfcd (type=r): __kstrtab_commit_creds
 ```
 
-Note that the debugging process needs to have the correct permissions for this
-command to show kernel addresses. For more information see
-also [this stackoverflow post](https://stackoverflow.com/a/55592796).
+Note that the debugging process needs to have the correct permissions for this command to show
+kernel addresses. For more information see also [this stackoverflow
+post](https://stackoverflow.com/a/55592796).

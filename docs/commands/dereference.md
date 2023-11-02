@@ -1,20 +1,18 @@
 ## Command `dereference`
 
-The `dereference` command (also aliased `telescope` for PEDA former users) aims
-to simplify the dereferencing of an address in GDB to determine the content it
-actually points to.
+The `dereference` command (also aliased `telescope` for PEDA former users) aims to simplify the
+dereferencing of an address in GDB to determine the content it actually points to.
 
-It is a useful convienence function to spare to process of manually tracking
-values with successive `x/x` in GDB.
+It is a useful convienence function to spare to process of manually tracking values with successive
+`x/x` in GDB.
 
-`dereference` takes three optional arguments, a start address (or symbol or
-register, etc) to dereference (by default, `$sp`), the number of consecutive
-addresses to dereference (by default, `10`) and the base location for offset
-calculation (by default the same as the start address):
+`dereference` takes three optional arguments, a start address (or symbol or register, etc) to
+dereference (by default, `$sp`), the number of consecutive addresses to dereference (by default,
+`10`) and the base location for offset calculation (by default the same as the start address):
 
-```
+```text
 gef➤  dereference
-0x00007fffffffdec0│+0x0000: 0x00007ffff7ffe190  →  0x0000555555554000  →   jg 0x555555554047	 ← $rsp, $r13
+0x00007fffffffdec0│+0x0000: 0x00007ffff7ffe190  →  0x0000555555554000  →   jg 0x555555554047   ← $rsp, $r13
 0x00007fffffffdec8│+0x0008: 0x00007ffff7ffe730  →  0x00007ffff7fd3000  →  0x00010102464c457f
 0x00007fffffffded0│+0x0010: 0x00007ffff7faa000  →  0x00007ffff7de9000  →  0x03010102464c457f
 0x00007fffffffded8│+0x0018: 0x00007ffff7ffd9f0  →  0x00007ffff7fd5000  →  0x00010102464c457f
@@ -28,7 +26,7 @@ gef➤  dereference
 
 Here is an example with arguments:
 
-```
+```text
 gef➤  telescope $rbp+0x10 -l 8
 0x00007fffffffdf40│+0x0000: 0x00007ffff7fa5760  →  0x00000000fbad2887
 0x00007fffffffdf48│+0x0008: 0x00000001f7e65b63
@@ -40,13 +38,13 @@ gef➤  telescope $rbp+0x10 -l 8
 0x00007fffffffdf78│+0x0038: 0x0000000000000000
 ```
 
-It also optionally accepts a second argument, the number of consecutive
-addresses to dereference (by default, `10`).
+It also optionally accepts a second argument, the number of consecutive addresses to dereference (by
+default, `10`).
 
-For example, if you want to dereference all the stack entries inside a function
-context (on a 64bit architecture):
+For example, if you want to dereference all the stack entries inside a function context (on a 64bit
+architecture):
 
-```
+```text
 gef➤  p ($rbp - $rsp)/8
 $3 = 4
 gef➤  dereference -l 5
@@ -57,10 +55,9 @@ gef➤  dereference -l 5
 0x00007fffffffe190│+0x0020: 0x0000000000400690  →  push r15        ← $rbp
 ```
 
-It is possible to change the offset calculation to use a different address than
-the start address:
+It is possible to change the offset calculation to use a different address than the start address:
 
-```
+```text
 gef➤  dereference $sp -l 7 -r $rbp
 0x00007ffe6ddaa3e0│-0x0030: 0x0000000000000000    ← $rsp
 0x00007ffe6ddaa3e8│-0x0028: 0x0000000000400970  →  <__libc_csu_init+0> push r15
@@ -69,4 +66,18 @@ gef➤  dereference $sp -l 7 -r $rbp
 0x00007ffe6ddaa400│-0x0010: 0x00007ffe6ddaa500  →  0x0000000000000001
 0x00007ffe6ddaa408│-0x0008: 0xa42456b3ee465800
 0x00007ffe6ddaa410│+0x0000: 0x0000000000000000    ← $rbp
+```
+
+Just like with `x`, you can pass a negative number of addresses to dereference, to examine memory
+backwards from the start address:
+
+```text
+gef➤  dereference $sp -l 3
+0x00007fffffffcf90│+0x0010: 0x00007ffff7f5aaa0  →  0x0000000000000000
+0x00007fffffffcf88│+0x0008: 0x00000000000204a0
+0x00007fffffffcf80│+0x0000: 0x00005555555a6b60  →  0x0000000000000000    ← $rsp
+gef➤  dereference $sp -l -3
+0x00007fffffffcf80│+0x0000: 0x00005555555a6b60  →  0x0000000000000000    ← $rsp
+0x00007fffffffcf78│-0x0008: 0x0000000000000020 (" "?)
+0x00007fffffffcf70│-0x0010: 0x000000000000000a ("\n"?)
 ```

@@ -2,7 +2,7 @@
 
 Customize `GEF` by changing its color scheme.
 
-```
+```text
 gef➤  theme
 context_title_message                   : red bold
 default_title_message                   : red bold
@@ -14,29 +14,29 @@ xinfo_title_message                     : blue bold
 
 ### Changing colors
 
-You have the possibility to change the coloring properties of `GEF` display with
-the `theme` command. The command accepts 2 arguments, the name of the property
-to update, and its new coloring value.
+You have the possibility to change the coloring properties of `GEF` display with the `theme`
+command. The command accepts 2 arguments, the name of the property to update, and its new coloring
+value.
 
 Colors can be one of the following:
 
-   - red
-   - green
-   - blue
-   - yellow
-   - gray
-   - pink
+-  red
+-  green
+-  blue
+-  yellow
+-  gray
+-  pink
 
 Color also accepts the following attributes:
 
-   - bold
-   - underline
-   - highlight
-   - blink
+-  bold
+-  underline
+-  highlight
+-  blink
 
 Any other will value simply be ignored.
 
-```
+```text
 gef➤  theme context_title_message blue bold foobar
 gef➤  theme
 context_title_message                   : blue bold

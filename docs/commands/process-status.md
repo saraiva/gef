@@ -2,11 +2,11 @@
 
 > This command replaces the old commands `pid` and `fd`.
 
-`process-status` provides an exhaustive description of the current running
-process, by extending the information provided by GDB `info proc` command, with
-all the information from the `procfs` structure.
+`process-status` provides an exhaustive description of the current running process, by extending the
+information provided by GDB `info proc` command, with all the information from the `procfs`
+structure.
 
-```
+```text
 gef➤ ps --smart-scan zsh
 22879
 gef➤ attach 22879
