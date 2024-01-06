@@ -164,6 +164,8 @@ __registered_functions__ : Set[Type["GenericFunction"]]                         
 __registered_architectures__ : Dict[Union["Elf.Abi", str], Type["Architecture"]]              = {}
 __registered_file_formats__ : Set[ Type["FileFormat"] ]                                       = set()
 
+GefMemoryMapProvider = Callable[[], Generator["Section", None, None]]
+
 
 def reset_all_caches() -> None:
     """Free all caches. If an object is cached, it will have a callable attribute `cache_clear`
@@ -644,12 +646,20 @@ class Permission(enum.Flag):
         return perm
 
     @classmethod
-    def from_info_mem(cls, perm_str: str) -> "Permission":
+    def from_monitor_info_mem(cls, perm_str: str) -> "Permission":
         perm = cls(0)
         # perm_str[0] shows if this is a user page, which
         # we don't track
         if perm_str[1] == "r": perm |= Permission.READ
         if perm_str[2] == "w": perm |= Permission.WRITE
+        return perm
+
+    @classmethod
+    def from_info_mem(cls, perm_str: str) -> "Permission":
+        perm = cls(0)
+        if "r" in perm_str: perm |= Permission.READ
+        if "w" in perm_str: perm |= Permission.WRITE
+        if "x" in perm_str: perm |= Permission.EXECUTE
         return perm
 
 
@@ -1375,7 +1385,8 @@ class GlibcArena:
 
     def __str__(self) -> str:
         properties = f"base={self.__address:#x}, top={self.top:#x}, " \
-                f"last_remainder={self.last_remainder:#x}, next={self.next:#x}"
+                f"last_remainder={self.last_remainder:#x}, next={self.next:#x}, " \
+                f"mem={self.system_mem}, mempeak={self.max_system_mem}"
         return (f"{Color.colorify('Arena', 'blue bold underline')}({properties})")
 
     def __repr__(self) -> str:
@@ -1699,6 +1710,15 @@ class GlibcChunk:
             msg.append(f"\n\n{self._str_pointers()}")
         return "\n".join(msg) + "\n"
 
+    def resolve_type(self) -> str:
+        ptr_data = gef.memory.read_integer(self.data_address)
+        if ptr_data != 0:
+            sym = gdb_get_location_from_symbol(ptr_data)
+            if sym is not None and "vtable for" in sym[0]:
+                return sym[0].replace("vtable for ", "")
+
+        return ""
+
 
 class GlibcFastChunk(GlibcChunk):
 
@@ -1988,7 +2008,6 @@ def gdb_lookup_symbol(sym: str) -> Optional[Tuple[Optional[str], Optional[Tuple[
     except gdb.error:
         return None
 
-
 @lru_cache(maxsize=512)
 def gdb_get_location_from_symbol(address: int) -> Optional[Tuple[str, int]]:
     """Retrieve the location of the `address` argument from the symbol table.
@@ -1999,11 +2018,13 @@ def gdb_get_location_from_symbol(address: int) -> Optional[Tuple[str, int]]:
     if sym.startswith("No symbol matches"):
         return None
 
+    # gdb outputs symbols with format: "<symbol_name> + <offset> in section <section_name> of <file>",
+    # here, we are only interested in symbol name and offset.
     i = sym.find(" in section ")
-    sym = sym[:i].split()
+    sym = sym[:i].split(" + ")
     name, offset = sym[0], 0
-    if len(sym) == 3 and sym[2].isdigit():
-        offset = int(sym[2])
+    if len(sym) == 2 and sym[1].isdigit():
+        offset = int(sym[1])
     return name, offset
 
 
@@ -2150,7 +2171,7 @@ def checksec(filename: str) -> Dict[str, bool]:
     return Elf(filename).checksec
 
 
-@lru_cache()
+@deprecated("Use `gef.arch` instead")
 def get_arch() -> str:
     """Return the binary's architecture."""
     if is_alive():
@@ -2258,6 +2279,7 @@ class Architecture(ArchitectureBase):
     _ptrsize: Optional[int] = None
     _endianness: Optional[Endianness] = None
     special_registers: Union[Tuple[()], Tuple[str, ...]] = ()
+    maps: Optional[GefMemoryMapProvider] = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -3679,20 +3701,22 @@ def reset_architecture(arch: Optional[str] = None) -> None:
             raise OSError(f"Specified arch {arch.upper()} is not supported")
         return
 
-    gdb_arch = get_arch()
-
-    preciser_arch = next((a for a in arches.values() if a.supports_gdb_arch(gdb_arch)), None)
-    if preciser_arch:
-        gef.arch = preciser_arch()
-        return
+    # check for bin running
+    if is_alive():
+        arch = gdb.selected_frame().architecture()
+        gdb_arch = arch.name()
+        preciser_arch = next((a for a in arches.values() if a.supports_gdb_arch(gdb_arch)), None)
+        if preciser_arch:
+            gef.arch = preciser_arch()
+            return
 
     # last resort, use the info from elf header to find it from the known architectures
-    try:
-        arch_name = gef.binary.e_machine if gef.binary else gdb_arch
-        gef.arch = arches[arch_name]()
-    except KeyError:
-        raise OSError(f"CPU type is currently not supported: {get_arch()}")
-    return
+    if gef.binary.e_machine:
+        try:
+            gef.arch = arches[gef.binary.e_machine]()
+        except KeyError:
+            raise OSError(f"CPU type is currently not supported: {gef.binary.e_machine}")
+        return
 
 
 @lru_cache()
@@ -4123,7 +4147,8 @@ class StubBreakpoint(gdb.Breakpoint):
         return
 
     def stop(self) -> bool:
-        gdb.execute(f"return (unsigned int){self.retval:#x}")
+        size = "long" if gef.arch.ptrsize == 8 else "int"
+        gdb.execute(f"return (unsigned {size}){self.retval:#x}")
         ok(f"Ignoring call to '{self.func}' "
            f"(setting return value to {self.retval:#x})")
         return False
@@ -6004,6 +6029,13 @@ class RemoteCommand(GenericCommand):
         # This prevents some spurious errors being thrown during startup
         gef.session.remote_initializing = True
         gef.session.remote = GefRemoteSessionManager(args.host, args.port, args.pid, qemu_binary)
+
+        dbg(f"[remote] initializing remote session with {gef.session.remote.target} under {gef.session.remote.root}")
+        if not gef.session.remote.connect(args.pid):
+            raise EnvironmentError(f"Cannot connect to remote target {gef.session.remote.target}")
+        if not gef.session.remote.setup():
+            raise EnvironmentError(f"Failed to create a proper environment for {gef.session.remote.target}")
+
         gef.session.remote_initializing = False
         reset_all_caches()
         gdb.execute("context")
@@ -6278,13 +6310,71 @@ class GlibcHeapChunkCommand(GenericCommand):
         return
 
 
+class GlibcHeapChunkSummary:
+    def __init__(self, desc = ""):
+        self.desc = desc
+        self.count = 0
+        self.total_bytes = 0
+
+    def process_chunk(self, chunk: GlibcChunk) -> None:
+        self.count += 1
+        self.total_bytes += chunk.size
+
+
+class GlibcHeapArenaSummary:
+    def __init__(self, resolve_type = False) -> None:
+        self.resolve_symbol = resolve_type
+        self.size_distribution = {}
+        self.flag_distribution = {
+            "PREV_INUSE": GlibcHeapChunkSummary(),
+            "IS_MMAPPED": GlibcHeapChunkSummary(),
+            "NON_MAIN_ARENA": GlibcHeapChunkSummary()
+        }
+
+    def process_chunk(self, chunk: GlibcChunk) -> None:
+        chunk_type = "" if not self.resolve_symbol else chunk.resolve_type()
+
+        per_size_summary = self.size_distribution.get((chunk.size, chunk_type), None)
+        if per_size_summary is None:
+            per_size_summary = GlibcHeapChunkSummary(desc=chunk_type)
+            self.size_distribution[(chunk.size, chunk_type)] = per_size_summary
+        per_size_summary.process_chunk(chunk)
+
+        if chunk.has_p_bit():
+            self.flag_distribution["PREV_INUSE"].process_chunk(chunk)
+        if chunk.has_m_bit():
+            self.flag_distribution["IS_MAPPED"].process_chunk(chunk)
+        if chunk.has_n_bit():
+            self.flag_distribution["NON_MAIN_ARENA"].process_chunk(chunk)
+
+    def print(self) -> None:
+        gef_print("== Chunk distribution by size ==")
+        gef_print("{:<10s}\t{:<10s}\t{:15s}\t{:s}".format("ChunkBytes", "Count", "TotalBytes", "Description"))
+        for chunk_info, chunk_summary in sorted(self.size_distribution.items(), key=lambda x: x[1].total_bytes, reverse=True):
+            gef_print("{:<10d}\t{:<10d}\t{:<15d}\t{:s}".format(chunk_info[0], chunk_summary.count, chunk_summary.total_bytes, chunk_summary.desc))
+
+        gef_print("\n== Chunk distribution by flag ==")
+        gef_print("{:<15s}\t{:<10s}\t{:s}".format("Flag", "TotalCount", "TotalBytes"))
+        for chunk_flag, chunk_summary in self.flag_distribution.items():
+            gef_print("{:<15s}\t{:<10d}\t{:<d}".format(chunk_flag, chunk_summary.count, chunk_summary.total_bytes))
+
+class GlibcHeapWalkContext:
+    def __init__(self, print_arena: bool = False, allow_unaligned: bool = False, min_size: int = 0, max_size: int = 0, count: int = -1, resolve_type: bool = False, summary: bool = False) -> None:
+        self.print_arena = print_arena
+        self.allow_unaligned = allow_unaligned
+        self.min_size = min_size
+        self.max_size = max_size
+        self.remaining_chunk_count = count
+        self.summary = summary
+        self.resolve_type = resolve_type
+
 @register
 class GlibcHeapChunksCommand(GenericCommand):
     """Display all heap chunks for the current arena. As an optional argument
     the base address of a different arena can be passed"""
 
     _cmdline_ = "heap chunks"
-    _syntax_  = f"{_cmdline_} [-h] [--all] [--allow-unaligned] [arena_address]"
+    _syntax_  = f"{_cmdline_} [-h] [--all] [--allow-unaligned] [--summary] [--min-size MIN_SIZE] [--max-size MAX_SIZE] [--count COUNT] [--resolve] [arena_address]"
     _example_ = (f"\n{_cmdline_}"
                  f"\n{_cmdline_} 0x555555775000")
 
@@ -6293,57 +6383,87 @@ class GlibcHeapChunksCommand(GenericCommand):
         self["peek_nb_byte"] = (16, "Hexdump N first byte(s) inside the chunk data (0 to disable)")
         return
 
-    @parse_arguments({"arena_address": ""}, {("--all", "-a"): True, "--allow-unaligned": True})
+    @parse_arguments({"arena_address": ""}, {("--all", "-a"): True, "--allow-unaligned": True, "--min-size": 0, "--max-size": 0, ("--count", "-n"): -1, ("--summary", "-s"): True, "--resolve": True})
     @only_if_gdb_running
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
         args = kwargs["arguments"]
+        ctx = GlibcHeapWalkContext(print_arena=args.all, allow_unaligned=args.allow_unaligned, min_size=args.min_size, max_size=args.max_size, count=args.count, resolve_type=args.resolve, summary=args.summary)
         if args.all or not args.arena_address:
             for arena in gef.heap.arenas:
-                self.dump_chunks_arena(arena, print_arena=args.all, allow_unaligned=args.allow_unaligned)
+                self.dump_chunks_arena(arena, ctx)
                 if not args.all:
                     return
         try:
             arena_addr = parse_address(args.arena_address)
             arena = GlibcArena(f"*{arena_addr:#x}")
-            self.dump_chunks_arena(arena, allow_unaligned=args.allow_unaligned)
+            self.dump_chunks_arena(arena, ctx)
         except gdb.error:
             err("Invalid arena")
             return
 
-    def dump_chunks_arena(self, arena: GlibcArena, print_arena: bool = False, allow_unaligned: bool = False) -> None:
-        heap_addr = arena.heap_addr(allow_unaligned=allow_unaligned)
+    def dump_chunks_arena(self, arena: GlibcArena, ctx: GlibcHeapWalkContext) -> None:
+        heap_addr = arena.heap_addr(allow_unaligned=ctx.allow_unaligned)
         if heap_addr is None:
             err("Could not find heap for arena")
             return
-        if print_arena:
+        if ctx.print_arena:
             gef_print(str(arena))
         if arena.is_main_arena():
             heap_end = arena.top + GlibcChunk(arena.top, from_base=True).size
-            self.dump_chunks_heap(heap_addr, heap_end, arena, allow_unaligned=allow_unaligned)
+            self.dump_chunks_heap(heap_addr, heap_end, arena, ctx)
         else:
             heap_info_structs = arena.get_heap_info_list() or []
             for heap_info in heap_info_structs:
-                if not self.dump_chunks_heap(heap_info.heap_start, heap_info.heap_end, arena, allow_unaligned=allow_unaligned):
+                if not self.dump_chunks_heap(heap_info.heap_start, heap_info.heap_end, arena, ctx):
                     break
         return
 
-    def dump_chunks_heap(self, start: int, end: int, arena: GlibcArena, allow_unaligned: bool = False) -> bool:
+    def dump_chunks_heap(self, start: int, end: int, arena: GlibcArena, ctx: GlibcHeapWalkContext) -> bool:
         nb = self["peek_nb_byte"]
-        chunk_iterator = GlibcChunk(start, from_base=True, allow_unaligned=allow_unaligned)
+        chunk_iterator = GlibcChunk(start, from_base=True, allow_unaligned=ctx.allow_unaligned)
+        heap_summary = GlibcHeapArenaSummary(resolve_type=ctx.resolve_type)
         for chunk in chunk_iterator:
-            if chunk.base_address == arena.top:
-                gef_print(
-                    f"{chunk!s} {LEFT_ARROW} {Color.greenify('top chunk')}")
+            heap_corrupted = chunk.base_address > end
+            should_process = self.should_process_chunk(chunk, ctx)
+
+            if not ctx.summary and chunk.base_address == arena.top:
+                if should_process:
+                    gef_print(
+                        f"{chunk!s} {LEFT_ARROW} {Color.greenify('top chunk')}")
                 break
 
-            if chunk.base_address > end:
+            if heap_corrupted:
                 err("Corrupted heap, cannot continue.")
                 return False
 
-            line = str(chunk)
-            if nb:
-                line += f"\n    [{hexdump(gef.memory.read(chunk.data_address, nb), nb, base=chunk.data_address)}]"
-            gef_print(line)
+            if not should_process:
+                continue
+
+            if ctx.remaining_chunk_count == 0:
+                break
+
+            if ctx.summary:
+                heap_summary.process_chunk(chunk)
+            else:
+                line = str(chunk)
+                if nb:
+                    line += f"\n    [{hexdump(gef.memory.read(chunk.data_address, nb), nb, base=chunk.data_address)}]"
+                gef_print(line)
+
+            ctx.remaining_chunk_count -= 1
+
+        if ctx.summary:
+            heap_summary.print()
+
+        return True
+
+    def should_process_chunk(self, chunk: GlibcChunk, ctx: GlibcHeapWalkContext) -> bool:
+        if chunk.size < ctx.min_size:
+            return False
+
+        if 0 < ctx.max_size < chunk.size:
+            return False
+
         return True
 
 
@@ -7220,6 +7340,9 @@ class ContextCommand(GenericCommand):
         super().__init__()
         self["enable"] = (True, "Enable/disable printing the context when breaking")
         self["show_source_code_variable_values"] = (True, "Show extra PC context info in the source code")
+        self["show_full_source_file_name_max_len"] = (30, "Show full source path name, if less than this value")
+        self["show_basename_source_file_name_max_len"] = (20, "Show the source basename in full, if less than this value")
+        self["show_prefix_source_path_name_len"] = (10, "When truncating source path, show this many path prefix characters")
         self["show_stack_raw"] = (False, "Show the stack pane as raw hexdump (no dereference)")
         self["show_registers_raw"] = (False, "Show the registers pane with raw values (no dereference)")
         self["show_opcodes_size"] = (0, "Number of bytes of opcodes to display next to the disassembly")
@@ -7299,6 +7422,9 @@ class ContextCommand(GenericCommand):
         if redirect and os.access(redirect, os.W_OK):
             enable_redirect_output(to_file=redirect)
 
+        if self["clear_screen"] and len(argv) == 0:
+            clear_screen(redirect)
+
         for section in current_layout:
             if section[0] == "-":
                 continue
@@ -7319,9 +7445,6 @@ class ContextCommand(GenericCommand):
                 pass
 
         self.context_title("")
-
-        if self["clear_screen"] and len(argv) == 0:
-            clear_screen(redirect)
 
         if redirect and os.access(redirect, os.W_OK):
             disable_redirect_output()
@@ -7661,10 +7784,17 @@ class ContextCommand(GenericCommand):
         bp_locations = [b.location for b in breakpoints if b.location and file_base_name in b.location]
         past_lines_color = gef.config["theme.old_context"]
 
+        show_full_path_max = self["show_full_source_file_name_max_len"]
+        show_basename_path_max = self["show_basename_source_file_name_max_len"]
+        show_prefix_path_len = self["show_prefix_source_path_name_len"]
+
         nb_line = self["nb_lines_code"]
         fn = symtab.filename
-        if len(fn) > 20:
-            fn = f"{fn[:15]}[...]{os.path.splitext(fn)[1]}"
+        if len(fn) > show_full_path_max:
+            base = os.path.basename(fn)
+            if len(base) > show_basename_path_max:
+                base = base[-show_basename_path_max:]
+            fn = fn[:15] + "[...]" + base
         title = f"source:{fn}+{line_num + 1}"
         cur_line_color = gef.config["theme.source_current_line"]
         self.context_title(title)
@@ -9491,6 +9621,7 @@ class GefCommand(gdb.Command):
         gef.config["gef.readline_compat"] = GefSetting(False, bool, "Workaround for readline SOH/ETX issue (SEGV)")
         gef.config["gef.debug"] = GefSetting(False, bool, "Enable debug mode for gef")
         gef.config["gef.autosave_breakpoints_file"] = GefSetting("", str, "Automatically save and restore breakpoints")
+        gef.config["gef.disable_target_remote_overwrite"] = GefSetting(False, bool, "Disable the overwrite of `target remote`")
         plugins_dir = GefSetting("", str, "Autoload additional GEF commands from external directory", hooks={"on_write": GefSetting.no_spaces})
         plugins_dir.add_hook("on_write", lambda _: self.load_extra_plugins())
         gef.config["gef.extra_plugins_dir"] = plugins_dir
@@ -9499,6 +9630,7 @@ class GefCommand(gdb.Command):
         gef.config["gef.show_deprecation_warnings"] = GefSetting(True, bool, "Toggle the display of the `deprecated` warnings")
         gef.config["gef.buffer"] = GefSetting(True, bool, "Internally buffer command output until completion")
         gef.config["gef.bruteforce_main_arena"] = GefSetting(False, bool, "Allow bruteforcing main_arena symbol if everything else fails")
+        gef.config["gef.libc_version"] = GefSetting("", str, "Specify libc version when auto-detection fails")
         gef.config["gef.main_arena_offset"] = GefSetting("", str, "Offset from libc base address to main_arena symbol (int or hex). Set to empty string to disable.")
 
         self.commands : Dict[str, GenericCommand] = collections.OrderedDict()
@@ -10344,23 +10476,38 @@ class GefMemoryManager(GefManager):
     @property
     def maps(self) -> List[Section]:
         if not self.__maps:
-            self.__maps = self.__parse_maps()
+            self.__maps = self._parse_maps()
         return self.__maps
 
-    def __parse_maps(self) -> List[Section]:
-        """Return the mapped memory sections"""
-        try:
-            if is_qemu_system():
-                return list(self.__parse_info_mem())
-        except gdb.error:
-            # Target may not support this command
-            pass
-        try:
-            return list(self.__parse_procfs_maps())
-        except FileNotFoundError:
-            return list(self.__parse_gdb_info_sections())
+    @classmethod
+    def _parse_maps(cls) -> List[Section]:
+        """Return the mapped memory sections. If the current arch has its maps
+        method defined, then defer to that to generated maps, otherwise, try to
+        figure it out from procfs, then info sections, then monitor info
+        mem."""
+        if gef.arch.maps is not None:
+            return list(gef.arch.maps())
 
-    def __parse_procfs_maps(self) -> Generator[Section, None, None]:
+        try:
+            return list(cls.parse_procfs_maps())
+        except:
+            pass
+
+        try:
+            return list(cls.parse_gdb_info_sections())
+        except:
+            pass
+
+        try:
+            return list(cls.parse_monitor_info_mem())
+        except:
+            pass
+
+        warn("Cannot get memory map")
+        return None
+
+    @staticmethod
+    def parse_procfs_maps() -> Generator[Section, None, None]:
         """Get the memory mapping from procfs."""
         procfs_mapfile = gef.session.maps
         if not procfs_mapfile:
@@ -10383,14 +10530,15 @@ class GefMemoryManager(GefManager):
                 perm = Permission.from_process_maps(perm)
                 inode = int(inode)
                 yield Section(page_start=addr_start,
-                            page_end=addr_end,
-                            offset=off,
-                            permission=perm,
-                            inode=inode,
-                            path=pathname)
+                              page_end=addr_end,
+                              offset=off,
+                              permission=perm,
+                              inode=inode,
+                              path=pathname)
         return
 
-    def __parse_gdb_info_sections(self) -> Generator[Section, None, None]:
+    @staticmethod
+    def parse_gdb_info_sections() -> Generator[Section, None, None]:
         """Get the memory mapping from GDB's command `maintenance info sections` (limited info)."""
         stream = StringIO(gdb.execute("maintenance info sections", to_string=True))
 
@@ -10404,14 +10552,11 @@ class GefMemoryManager(GefManager):
                 off = int(parts[3][:-1], 16)
                 path = parts[4]
                 perm = Permission.from_info_sections(parts[5:])
-                yield Section(
-                    page_start=addr_start,
-                    page_end=addr_end,
-                    offset=off,
-                    permission=perm,
-                    inode="",
-                    path=path
-                )
+                yield Section(page_start=addr_start,
+                              page_end=addr_end,
+                              offset=off,
+                              permission=perm,
+                              path=path)
 
             except IndexError:
                 continue
@@ -10419,11 +10564,15 @@ class GefMemoryManager(GefManager):
                 continue
         return
 
-    def __parse_info_mem(self) -> Generator[Section, None, None]:
-        """Get the memory mapping from GDB's command `monitor info mem`"""
-        for line in StringIO(gdb.execute("monitor info mem", to_string=True)):
-            if not line:
-                break
+    @staticmethod
+    def parse_monitor_info_mem() -> Generator[Section, None, None]:
+        """Get the memory mapping from GDB's command `monitor info mem`
+        This can raise an exception, which the memory manager takes to mean
+        that this method does not work to get a map.
+        """
+        stream = StringIO(gdb.execute("monitor info mem", to_string=True))
+
+        for line in stream:
             try:
                 ranges, off, perms = line.split()
                 off = int(off, 16)
@@ -10431,14 +10580,32 @@ class GefMemoryManager(GefManager):
             except ValueError as e:
                 continue
 
-            perm = Permission.from_info_mem(perms)
-            yield Section(
-                page_start=start,
-                page_end=end,
-                offset=off,
-                permission=perm,
-                inode="",
-            )
+            perm = Permission.from_monitor_info_mem(perms)
+            yield Section(page_start=start,
+                          page_end=end,
+                          offset=off,
+                          permission=perm)
+
+    @staticmethod
+    def parse_info_mem():
+        """Get the memory mapping from GDB's command `info mem`. This can be
+        provided by certain gdbserver implementations."""
+        for line in StringIO(gdb.execute("info mem", to_string=True)):
+            # Using memory regions provided by the target.
+            # Num Enb Low Addr   High Addr  Attrs
+            # 0   y   0x10000000 0x10200000 flash blocksize 0x1000 nocache
+            # 1   y   0x20000000 0x20042000 rw nocache
+            _, en, start, end, *attrs = line.split()
+            if en != "y":
+                continue
+
+            if "flash" in attrs:
+                perm = Permission.from_info_mem("r")
+            else:
+                perm = Permission.from_info_mem("rw")
+            yield Section(page_start=int(start, 0),
+                          page_end=int(end, 0),
+                          permission=perm)
 
 
 class GefHeapManager(GefManager):
@@ -10849,12 +11016,6 @@ class GefRemoteSessionManager(GefSessionManager):
         self.__local_root_fd = tempfile.TemporaryDirectory()
         self.__local_root_path = pathlib.Path(self.__local_root_fd.name)
         self.__qemu = qemu
-        dbg(f"[remote] initializing remote session with {self.target} under {self.root}")
-        if not self.connect(pid):
-            raise EnvironmentError(f"Cannot connect to remote target {self.target}")
-        if not self.setup():
-            raise EnvironmentError(f"Failed to create a proper environment for {self.target}")
-        return
 
     def close(self) -> None:
         self.__local_root_fd.cleanup()
@@ -11049,8 +11210,14 @@ class GefLibcManager(GefManager):
     def version(self) -> Optional[Tuple[int, int]]:
         if not is_alive():
             return None
+
         if not self._version:
             self._version = GefLibcManager.find_libc_version()
+
+        # Whenever auto-detection fails, we use the user-provided version.
+        if self._version == (0, 0) and gef.config["gef.libc_version"] != "":
+            return tuple([int(v) for v in gef.config["gef.libc_version"].split(".")])
+
         return self._version
 
     @staticmethod
@@ -11123,6 +11290,14 @@ class Gef:
             mgr.reset_caches()
         return
 
+
+def target_remote_posthook():
+    if gef.session.remote_initializing:
+        return
+
+    gef.session.remote = GefRemoteSessionManager("", 0)
+    if not gef.session.remote.setup():
+        raise EnvironmentError(f"Failed to create a proper environment for {gef.session.remote}")
 
 if __name__ == "__main__":
     if sys.version_info[0] == 2:
@@ -11202,11 +11377,32 @@ if __name__ == "__main__":
 
     GefTmuxSetup()
 
-    # `target remote` commands cannot be disabled, so print a warning message instead
-    errmsg = "Using `target remote` with GEF does not work, use `gef-remote` instead. You've been warned."
-    hook = f"""pi if calling_function() != "connect": err("{errmsg}")"""
-    gdb.execute(f"define target hook-remote\n{hook}\nend")
-    gdb.execute(f"define target hook-extended-remote\n{hook}\nend")
+
+    disable_tr_overwrite_setting = "gef.disable_target_remote_overwrite"
+
+    if not gef.config[disable_tr_overwrite_setting]:
+        warnmsg = ("Using `target remote` with GEF should work in most cases, "
+                   "but use `gef-remote` if you can. You can disable the "
+                   "overwrite of the `target remote` command by toggling "
+                   f"`{disable_tr_overwrite_setting}` in the config.")
+        hook = f"""
+            define target hookpost-{{}}
+            pi target_remote_posthook()
+            context
+            pi if calling_function() != "connect": warn("{warnmsg}")
+            end
+        """
+
+        # Register a post-hook for `target remote` that initialize the remote session
+        gdb.execute(hook.format("remote"))
+        gdb.execute(hook.format("extended-remote"))
+    else:
+        errmsg = ("Using `target remote` does not work, use `gef-remote` "
+                  f"instead. You can toggle `{disable_tr_overwrite_setting}` "
+                  "if this is not desired.")
+        hook = f"""pi if calling_function() != "connect": err("{errmsg}")"""
+        gdb.execute(f"define target hook-remote\n{hook}\nend")
+        gdb.execute(f"define target hook-extended-remote\n{hook}\nend")
 
     # restore saved breakpoints (if any)
     bkp_fpath = pathlib.Path(gef.config["gef.autosave_breakpoints_file"]).expanduser().absolute()
